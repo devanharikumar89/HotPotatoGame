@@ -1,0 +1,2 @@
+1. Run the server, giving an unused port number. If address already in use, use a different port or wait 4 minutes
+2. Run the clients.

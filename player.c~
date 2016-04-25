@@ -1,0 +1,526 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+
+#define LEN	100
+
+char recHost[LEN];
+struct hostent *left, *right;
+int rightListenSocket, leftListenSocket, mainSocket;
+int rightSendSocket, leftSendSocket;
+struct sockaddr_in rightsin, leftsin;
+int rightPort = 8899, leftPort = 9988;
+int acceptFromRight;
+struct sockaddr addrFromRight;
+int playerID, totalPlayers;
+int rcLeft, rcRight;
+int rightAcceptor, leftAcceptor;
+int mainrc;
+
+void setUpRightSide();
+void setUpLeftSide();
+void connectToLeft(char *);
+void connectToRight(char *);
+void listenOnAllSockets();
+
+main(int argc, char *argv[]) {
+
+	int len, port;
+	char host[LEN], str[LEN];
+	char buf[LEN];
+	struct hostent *hp;
+	struct sockaddr_in sin;
+
+	if (argc != 3) {
+		fprintf(stderr, "Usage: %s <host-name> <port-number>\n", argv[0]);
+		exit(1);
+	}
+
+	hp = gethostbyname(argv[1]);
+	if (hp == NULL) {
+		fprintf(stderr, "%s: host not found (%s)\n", argv[0], host);
+		exit(1);
+	}
+	port = atoi(argv[2]);
+
+	mainSocket = socket(AF_INET, SOCK_STREAM, 0);
+	if (mainSocket < 0) {
+		perror("socket:");
+		exit(mainSocket);
+	}
+
+	sin.sin_family = AF_INET;
+	sin.sin_port = htons(port);
+
+	memcpy(&sin.sin_addr, hp->h_addr_list[0], hp->h_length);
+	int seed = time(NULL);
+	srand(seed);
+	setUpRightSide();
+	setUpLeftSide();
+
+	mainrc = connect(mainSocket, (struct sockaddr *) &sin, sizeof(sin));
+	if (mainrc < 0) {
+		perror("connect:");
+		exit(mainrc);
+	}
+
+	//send ports
+	char ports[15];
+	char left[6];
+	memset(ports, '\0', sizeof ports);
+	memset(left, '\0', sizeof left);
+	sprintf(ports, "%d", rightPort);
+	sprintf(left, "%d", leftPort);
+	strcat(ports, "|");
+	strcat(ports, left);
+
+	send(mainSocket, ports, sizeof ports, 0);
+
+	memset(buf, '\0', sizeof buf);
+	int leng = recv(mainSocket, buf, LEN, 0); //receive number, total players and right port of left person
+	if (leng < 0) {
+	} else {
+		buf[leng] = '\0';
+	}
+	char* idStr = strtok(buf, "|");
+	char* totalStr = strtok(NULL, "|");
+	printf("Connected as player %s\n", idStr);
+	playerID = atoi(idStr);
+	totalPlayers = atoi(totalStr);
+
+	/*if (playerID != 0) {
+	 char* leftToConnectStr = strtok(NULL, "|");
+	 rightPort = atoi(leftToConnectStr);
+	 }*/
+
+	/*else { //for player 0 this information will come late , check this
+	 memset(buf, '\0', sizeof buf);
+	 int leng = recv(mainSocket, buf, LEN, 0); //receive ports
+	 if (leng < 0) {
+	 } else {
+	 buf[leng] = '\0';
+	 }
+	 char* leftToConnectStr = strtok(NULL, "|");
+	 rightPort = atoi(leftToConnectStr);
+	 }*/
+	memset(buf, '\0', sizeof buf);
+	leng = recv(mainSocket, buf, LEN, 0); //receive neighbor information
+	if (leng < 0) {
+	} else {
+		buf[leng] = '\0';
+	}
+	//printf("received : %s, Connecting to peer\n", buf);
+
+	if (playerID == 0) {
+		connectToRight(buf);
+	} else {
+		connectToLeft(buf);
+	}
+
+	memset(buf, '\0', sizeof buf);
+
+	leng = recv(mainSocket, buf, LEN, 0);
+	if (leng < 0) {
+
+	} else {
+		buf[leng] = '\0';
+	}
+	//printf("received : %s, Connecting to peer\n", buf);
+
+	if (playerID == 0) {
+		connectToLeft(buf);
+	} else {
+		connectToRight(buf);
+	}
+
+	//Here we have to wait till all the connections are set
+	//So, we call listen here
+	struct sockaddr_in incoming;
+	int sizeSin = sizeof(leftsin);
+	rightAcceptor = accept(rightListenSocket, (struct sockaddr *) &incoming,
+			&sizeSin);
+	//printf("right accepted\n");
+	fflush(stdout);
+	leftAcceptor = accept(leftListenSocket, (struct sockaddr *) &incoming,
+			&sizeSin);
+	//printf("left accepted\n");
+	fflush(stdout);
+	//At this  point all 3 connections are up and running.
+	//So the player must listen on the 3 sockets at the same time.
+	//mainSocket, leftSocket and rightSocket
+	//So we invoke select here
+
+	listenOnAllSockets();
+
+	
+}
+
+void connectToLeft(char *hostnameandport) {
+	//printf("%s\n", hostnameandport);
+	char* hostname = strtok(hostnameandport, "|");
+	char* port = strtok(NULL, "|");
+
+	int rp = atoi(port);
+	struct hostent * left = gethostbyname(hostname);
+	if (left == NULL) {
+		fprintf(stderr, "%s: host not found\n", hostname);
+		exit(1);
+	}
+
+	leftSendSocket = socket(AF_INET, SOCK_STREAM, 0);
+	if (leftSendSocket < 0) {
+		perror("socket:");
+		exit(leftSendSocket);
+	}
+	struct sockaddr_in leftsin;
+	leftsin.sin_family = AF_INET;
+	leftsin.sin_port = htons(rp);
+	memcpy(&leftsin.sin_addr, left->h_addr_list[0], left->h_length);
+
+	rcLeft = connect(leftSendSocket, (struct sockaddr *) &leftsin,
+			sizeof(leftsin));
+	if (rcLeft < 0) {
+		perror("connect:");
+		exit(rcLeft);
+	}
+
+}
+
+void connectToRight(char *hostnameandport) {
+	//printf("%s\n", hostnameandport);
+	char* hostname = strtok(hostnameandport, "|");
+	char* port = strtok(NULL, "|");
+	int lp = atoi(port);
+	struct hostent * right = gethostbyname(hostname);
+	if (right == NULL) {
+		fprintf(stderr, "%s: host not found\n", hostname);
+		exit(1);
+	}
+
+	rightSendSocket = socket(AF_INET, SOCK_STREAM, 0);
+	if (rightSendSocket < 0) {
+		perror("socket:");
+		exit(rightSendSocket);
+	}
+	struct sockaddr_in rightsin;
+	rightsin.sin_family = AF_INET;
+	rightsin.sin_port = htons(lp);
+	memcpy(&rightsin.sin_addr, right->h_addr_list[0], right->h_length);
+
+	rcRight = connect(rightSendSocket, (struct sockaddr *) &rightsin,
+			sizeof(rightsin));
+	if (rcRight < 0) {
+		perror("connect:");
+		exit(rcRight);
+	}
+
+}
+
+void setUpLeftSide() {
+
+	//printf("left port : %d\n", leftPort);
+
+	gethostname(recHost, sizeof recHost);
+	left = gethostbyname(recHost);
+	if (recHost == NULL) {
+		fprintf(stderr, "host not found (%s)\n", recHost);
+		exit(1);
+	}
+	leftListenSocket = socket(AF_INET, SOCK_STREAM, 0);
+	if (leftListenSocket < 0) {
+		perror("socket:");
+		exit(leftListenSocket);
+	}
+
+	int bindLeft = -1;
+	while (bindLeft < 0) {
+
+		leftPort = rightPort + (rand() % 30000);
+		leftsin.sin_family = AF_INET;
+		leftsin.sin_port = htons(leftPort);
+
+		memcpy(&leftsin.sin_addr, left->h_addr_list[0], left->h_length);
+		bindLeft = bind(leftListenSocket, (struct sockaddr *) &leftsin,
+				sizeof(leftsin));
+	}
+
+	if (bindLeft < 0) {
+		perror("bind Left:");
+		exit(bindLeft);
+	}
+
+	bindLeft = listen(leftListenSocket, 1);
+	if (bindLeft < 0) {
+		perror("listen Left:");
+		exit(bindLeft);
+	}
+}
+
+void setUpRightSide() {
+
+//	printf("right port : %d\n", rightPort);
+
+	gethostname(recHost, sizeof recHost);
+	right = gethostbyname(recHost);
+	if (recHost == NULL) {
+		fprintf(stderr, "host not found (%s)\n", recHost);
+		exit(1);
+	}
+	rightListenSocket = socket(AF_INET, SOCK_STREAM, 0);
+	if (rightListenSocket < 0) {
+		perror("socket:");
+		exit(rightListenSocket);
+	}
+
+	int bindRight = -1;
+	while (bindRight < 0) {
+		rightPort = 3000 + (rand() % 30000);
+		rightsin.sin_family = AF_INET;
+		rightsin.sin_port = htons(rightPort);
+
+		memcpy(&rightsin.sin_addr, right->h_addr_list[0], right->h_length);
+		bindRight = bind(rightListenSocket, (struct sockaddr *) &rightsin,
+				sizeof(rightsin));
+
+	}
+	if (bindRight < 0) {
+		perror("bind Right:");
+		exit(bindRight);
+	}
+
+	bindRight = listen(rightListenSocket, 1);
+	if (bindRight < 0) {
+		perror("listen Right:");
+		exit(bindRight);
+	}
+}
+
+//http://www.retran.com/beej/selectman.html
+
+selectANeighborAndSendPotato(int hopNow, char* trace) {
+	//printf("function received : %s\n", trace);
+	char num[33];
+	memset(num, '\0', sizeof num);
+	sprintf(num, "%d", hopNow);
+
+	char id[33];
+	memset(id, '\0', sizeof id);
+	sprintf(id, "%d", playerID);
+
+	int length = strlen(num) + strlen(id) + 1;	//+1 for |
+	if (trace != NULL) {
+		length += strlen(trace) + 1;	//+1 for >
+	}
+	char payload[length];
+	memset(payload, '\0', length);
+
+	strcpy(payload, num);
+	strcat(payload, "|");
+	if (trace != NULL) {
+		strcat(payload, trace);
+		strcat(payload, ">");
+	}
+	strcat(payload, id);
+
+	char header[100];
+	memset(header, '\0', sizeof header);
+	sprintf(header, "%d", strlen(payload));
+
+	int pick = rand() % 2;
+	int sendTo = pick == 0 ? leftSendSocket : rightSendSocket;
+
+	int playerTo = playerID;
+	if (pick == 0) {
+		if (playerID == 0) {
+			playerTo = totalPlayers - 1;
+		} else {
+			playerTo = playerID - 1;
+		}
+	} else {
+		if (playerID == totalPlayers - 1) {
+			playerTo = 0;
+		} else {
+			playerTo = playerID + 1;
+		}
+	}
+	int much = send(sendTo, header, 100, 0);
+	//sleep(0.01);
+	printf("Sending potato to %d\n", playerTo);
+	//fflush(stdout);
+	much = send(sendTo, payload, strlen(payload), 0);
+	//printf("\nSent %d bytes\n", much);
+
+}
+
+void listenOnAllSockets() {
+	char buffer1[100], buffer2[100], buffer3[100];
+	memset(buffer1, '\0', 100);
+	memset(buffer2, '\0', 100);
+	memset(buffer3, '\0', 100);
+	struct timeval tv;
+	tv.tv_sec = 10;
+	fd_set readfds;
+	srand(playerID);
+	while (1) {
+		FD_ZERO(&readfds);
+		FD_SET(mainSocket, &readfds);
+		FD_SET(leftAcceptor, &readfds);
+		FD_SET(rightAcceptor, &readfds);
+
+		int largestFD = (mainSocket > leftAcceptor) ? mainSocket : leftAcceptor;
+		largestFD = (largestFD > rightAcceptor) ? largestFD : rightAcceptor;
+		int rv = select(largestFD + 1, &readfds, NULL, NULL, NULL);
+		if (rv == -1) {
+			perror("select");
+		} else if (rv == 0) {
+		} else {
+			if (FD_ISSET(leftAcceptor, &readfds)) {
+				//printf("test\n");
+				char* hopNoStr = NULL, *rest = NULL;
+				int recLen = recv(leftAcceptor, buffer2, sizeof buffer2, 0); //receives length first
+				if (recLen > 0) {
+					int expectedLength = atoi(buffer2);
+					char* data = (char *) malloc(
+							sizeof(char) * (expectedLength + 1));
+					if (data == NULL) {
+						perror("malloc : ");
+					}
+					//char data[expectedLength + 1];
+					//	printf("test\n");
+					memset(data, '\0', expectedLength + 1);
+
+					/*while (expectedLength > 100) {
+					 printf(
+					 "INSIDE WHILE***************************************\n");
+					 int payloadrecLen = recv(leftAcceptor, data + i, 100,
+					 0);
+					 i += 100;
+					 expectedLength -= 100;
+					 }*/
+					int a = recv(leftAcceptor, data, expectedLength, 0);
+					while (a < expectedLength) {
+						int yetToreceive = expectedLength - a;
+						//printf("%d not upto %d", a, expectedLength);
+						int b = recv(leftAcceptor, data + a, yetToreceive, 0);
+						a = a + b;
+						//	printf("new expected length = %d\n", yetToreceive);
+
+					}
+					//	printf("test\n");
+					/*int payloadrecLen = recv(leftAcceptor, data + i,
+					 expectedLength, 0);*/
+
+					//	printf("got %s through right\n", data);
+					hopNoStr = strtok(data, "|");
+					rest = strtok(NULL, "|");	//this is the trace
+					int hopNow = atoi(hopNoStr);
+					if (hopNow == 0) {
+						printf("I'm it\n");
+						fflush(stdout);
+						char lengthOfTrace[100];
+						memset(lengthOfTrace, '\0', 100);
+						sprintf(lengthOfTrace, "%d", strlen(rest));
+						int feedback = send(mainSocket, lengthOfTrace, 100, 0);
+						//sleep(1);
+						feedback = send(mainSocket, rest, strlen(rest), 0);
+					} else {
+
+						hopNow--;
+						selectANeighborAndSendPotato(hopNow, rest);
+					}
+					free(data);
+				} else {
+				}
+			}
+
+			if (FD_ISSET(rightAcceptor, &readfds)) {
+				//	printf("tester\n");
+				char* hopNoStr = NULL, *rest = NULL;
+				int recLen = recv(rightAcceptor, buffer3, sizeof buffer3, 0);//receives length first
+				if (recLen > 0) {
+					int expectedLength = atoi(buffer3);
+					//char data[expectedLength + 1];
+
+					char* data = (char *) malloc(
+							sizeof(char) * (expectedLength + 1));
+					//printf("test\n");
+					memset(data, '\0', expectedLength + 1);
+
+					int i = 0;
+					/*while (expectedLength > 100) {
+					 printf("INSIDE WHILE *************\n");
+					 int payloadrecLen = recv(rightAcceptor, data + i, 100,
+					 0);
+					 i += 100;
+					 expectedLength -= 100;
+					 }*/
+					int a = recv(rightAcceptor, data, expectedLength, 0);
+					while (a < expectedLength) {
+						int yetToreceive = expectedLength - a;
+						//	printf("%d not upto %d", a, expectedLength);
+						int b = recv(rightAcceptor, data + a, yetToreceive, 0);
+						a = a + b;
+						//	printf("new expected length = %d\n", yetToreceive);
+
+					}
+
+					//		printf("test\n");
+					/*int payloadrecLen = recv(rightAcceptor, data + i,
+					 expectedLength, 0);*/
+					//	printf("test\n");
+					//	printf("got %s through right\n", data);
+					hopNoStr = strtok(data, "|");
+					rest = strtok(NULL, "|");	//this is the trace
+					int hopNow = atoi(hopNoStr);
+					if (hopNow == 0) {
+						printf("I'm it\n");
+						fflush(stdout);
+						char lengthOfTrace[100];
+						memset(lengthOfTrace, '\0', 100);
+						sprintf(lengthOfTrace, "%d", strlen(rest));
+						int feedback = send(mainSocket, lengthOfTrace, 100, 0);
+						//sleep(1);
+						feedback = send(mainSocket, rest, strlen(rest), 0);
+					} else {
+						hopNow--;
+						selectANeighborAndSendPotato(hopNow, rest);
+					}
+					free(data);
+				} else {
+				}
+			}
+			if (FD_ISSET(mainSocket, &readfds)) {
+				//	printf("got potato through main\n");
+				char* hopNoStr = NULL, *rest = NULL;
+				int recLen = recv(mainSocket, buffer1, sizeof buffer1, 0);
+				if (recLen > 0) {
+					buffer1[recLen] = '\0';
+					if (strcmp(buffer1, "stop") == 0) {
+						FD_ZERO(&readfds);
+						break;
+					}
+					hopNoStr = strtok(buffer1, "|");
+					int hopNow = atoi(hopNoStr);
+					if (hopNow == 0) {		//This case never happens !!
+						printf("I'm it\n");
+						fflush(stdout);
+						int feedback = send(mainSocket, rest, 100, 0);
+						break;
+					}
+					hopNow--;
+					//	printf("garbage : %s\n", rest);
+					selectANeighborAndSendPotato(hopNow, rest);
+
+				} else {
+				}
+			}
+
+		}
+	}
+}
+
